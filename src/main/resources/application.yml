@@ -1,0 +1,21 @@
+server:
+  port: 9103
+
+spring:
+  application:
+    name: aegis-mfa-webauthn-service
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${AEGIS_ISSUER:http://localhost:9000}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      probes:
+        enabled: true
