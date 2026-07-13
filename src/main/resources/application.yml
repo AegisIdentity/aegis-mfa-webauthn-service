@@ -4,11 +4,37 @@ server:
 spring:
   application:
     name: aegis-mfa-webauthn-service
-  security:
-    oauth2:
-      resourceserver:
-        jwt:
-          issuer-uri: ${AEGIS_ISSUER:http://localhost:9000}
+  datasource:
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/aegis_mfa}
+    username: ${POSTGRES_USER:aegis}
+    password: ${POSTGRES_PASSWORD:dev-only-change-me}
+  jpa:
+    hibernate:
+      # Dev/test convenience. Production uses versioned migrations (Flyway) with ddl-auto=validate.
+      ddl-auto: update
+    open-in-view: false
+
+aegis:
+  jwt:
+    # Keys fetched in-network; issuers validated against an allowlist (Docker split-horizon — see
+    # ResourceServerJwtConfig). In Docker, AEGIS_JWKS_URI = http://authorization-server:9000/oauth2/jwks.
+    jwk-set-uri: ${AEGIS_JWKS_URI:http://localhost:9000/oauth2/jwks}
+    accepted-issuers: ${AEGIS_ACCEPTED_ISSUERS:http://localhost:9000,http://authorization-server:9000}
+  mfa:
+    totp:
+      # Shown in the authenticator app (issuer:account). Digits/period/window are RFC 6238 defaults.
+      issuer: ${AEGIS_TOTP_ISSUER:Aegis}
+      digits: 6
+      period-seconds: 30
+      # Accept codes ±N steps to tolerate clock skew (each step = period-seconds).
+      allowed-skew-steps: 1
+    webauthn:
+      # The Relying Party. rp-id must be a registrable-domain suffix of the origin the ceremony runs on.
+      # Locally the console serves the ceremony at http://localhost:3000, so rp-id=localhost.
+      rp-id: ${AEGIS_WEBAUTHN_RP_ID:localhost}
+      rp-name: ${AEGIS_WEBAUTHN_RP_NAME:Aegis}
+      allowed-origins: ${AEGIS_WEBAUTHN_ORIGINS:http://localhost:3000,http://localhost:9000}
+      challenge-ttl-seconds: 300
 
 management:
   endpoints:

@@ -7,8 +7,21 @@ import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.web.SecurityFilterChain;
 
-/** Resource-server security baseline (default-deny, shared hardening headers, 401-not-302).
- * Endpoint-specific scopes are added as real endpoints are implemented. */
+/**
+ * Resource-server security baseline (default-deny, shared hardening headers, 401-not-302).
+ *
+ * <p>Authorization model:
+ * <ul>
+ *   <li><b>Self-service</b> ({@code /api/v1/mfa/factors}, {@code /totp/**}, {@code /webauthn/**}) — any
+ *       authenticated token. These endpoints operate <em>only</em> on the caller's own tenant+subject
+ *       (both taken from the token, never the request body), so a valid session is sufficient and no
+ *       extra scope is required. A user managing their own factors cannot touch anyone else's.</li>
+ *   <li><b>Step-up</b> ({@code /internal/**}) — {@code SCOPE_mfa:verify}. Server-to-server only: the
+ *       authorization-server calls these during login to check enrolment and validate a factor. Only
+ *       the AS's own service token carries this scope.</li>
+ *   <li><b>Admin</b> ({@code /admin/**}) — {@code SCOPE_mfa:admin}. Tenant admin resetting a user's MFA.</li>
+ * </ul>
+ */
 @Configuration(proxyBeanMethods = false)
 public class SecurityConfig {
 
@@ -19,7 +32,12 @@ public class SecurityConfig {
         http
                 .authorizeHttpRequests(authorize -> authorize
                         .requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
-                        .requestMatchers("/api/**").hasAuthority("SCOPE_mfa:admin")
+                        // Server-to-server step-up (authorization-server during login).
+                        .requestMatchers("/api/v1/mfa/internal/**").hasAuthority("SCOPE_mfa:verify")
+                        // Tenant-admin MFA reset.
+                        .requestMatchers("/api/v1/mfa/admin/**").hasAuthority("SCOPE_mfa:admin")
+                        // Self-service factor management — any authenticated caller, own subject only.
+                        .requestMatchers("/api/v1/mfa/**").authenticated()
                         .anyRequest().authenticated())
                 .oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()));
         return http.build();

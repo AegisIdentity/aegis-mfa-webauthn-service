@@ -1,14 +1,17 @@
 package io.aegis.mfa;
 
+import io.aegis.mfa.config.MfaProperties;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 
 /** Passkeys (WebAuthn/FIDO2), TOTP, and step-up MFA.
  *
- * <p>Maturity: scaffold. This is a buildable, secured resource-server skeleton (health + a
- * protected info endpoint + the shared hardening baseline) ready for feature work. See
+ * <p>Self-service factor enrolment (TOTP + passkeys) for the end-user portal, plus server-to-server
+ * step-up verification consumed by the authorization-server during login. See
  * aegis-platform-docs/architecture/SERVICE-CATALOG.md for the intended contract. */
 @SpringBootApplication
+@EnableConfigurationProperties(MfaProperties.class)
 public class MfaApplication {
     public static void main(String[] args) {
         SpringApplication.run(MfaApplication.class, args);
