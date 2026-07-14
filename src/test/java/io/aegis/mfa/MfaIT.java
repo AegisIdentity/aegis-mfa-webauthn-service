@@ -218,6 +218,108 @@ class MfaIT {
     }
 
     @Test
+    void webauthn_assert_options_are_issued() throws Exception {
+        mockMvc.perform(post("/api/v1/mfa/internal/webauthn/assert/options")
+                        .with(jwtForTenant("platform", "as-svc", "mfa:verify"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tenant\":\"acme\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.challengeId").isNotEmpty())
+                .andExpect(jsonPath("$.challenge").isNotEmpty())
+                .andExpect(jsonPath("$.rpId").value("localhost"))
+                .andExpect(jsonPath("$.userVerification").value("preferred"))
+                .andExpect(jsonPath("$.allowCredentials").isArray());
+    }
+
+    @Test
+    void webauthn_assert_options_accepts_a_blank_tenant() throws Exception {
+        // The AS may not know the tenant yet (usernameless); a blank/absent tenant is allowed.
+        mockMvc.perform(post("/api/v1/mfa/internal/webauthn/assert/options")
+                        .with(jwtForTenant("platform", "as-svc", "mfa:verify"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tenant\":\"\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.challengeId").isNotEmpty())
+                .andExpect(jsonPath("$.challenge").isNotEmpty());
+    }
+
+    @Test
+    void webauthn_assert_options_require_the_verify_scope() throws Exception {
+        // A self-service token (no mfa:verify) must not reach the server-to-server assertion endpoint.
+        mockMvc.perform(post("/api/v1/mfa/internal/webauthn/assert/options")
+                        .with(jwtForTenant("acme", "u-1"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tenant\":\"acme\"}"))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void webauthn_assert_options_require_a_token() throws Exception {
+        mockMvc.perform(post("/api/v1/mfa/internal/webauthn/assert/options")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tenant\":\"acme\"}"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void webauthn_assert_verify_with_unknown_challenge_is_invalid_not_an_error() throws Exception {
+        // A bogus challengeId + credentialId is a clean valid:false (200), never a 4xx/5xx.
+        mockMvc.perform(post("/api/v1/mfa/internal/webauthn/assert/verify")
+                        .with(jwtForTenant("platform", "as-svc", "mfa:verify"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{"
+                                + "\"challengeId\":\"" + java.util.UUID.randomUUID() + "\","
+                                + "\"credentialId\":\"AAAA\","
+                                + "\"authenticatorData\":\"AAAA\","
+                                + "\"clientDataJSON\":\"AAAA\","
+                                + "\"signature\":\"AAAA\","
+                                + "\"userHandle\":null}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.valid").value(false))
+                .andExpect(jsonPath("$.tenant").doesNotExist())
+                .andExpect(jsonPath("$.subject").doesNotExist());
+    }
+
+    @Test
+    void webauthn_assert_verify_with_a_real_challenge_but_unknown_credential_is_invalid() throws Exception {
+        // Mint a real assertion challenge, then present an unknown credentialId -> valid:false.
+        String options = mockMvc.perform(post("/api/v1/mfa/internal/webauthn/assert/options")
+                        .with(jwtForTenant("platform", "as-svc", "mfa:verify"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tenant\":\"acme\"}"))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        String challengeId = JsonPath.read(options, "$.challengeId");
+
+        mockMvc.perform(post("/api/v1/mfa/internal/webauthn/assert/verify")
+                        .with(jwtForTenant("platform", "as-svc", "mfa:verify"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{"
+                                + "\"challengeId\":\"" + challengeId + "\","
+                                + "\"credentialId\":\"bm9zdWNoY3JlZA\","
+                                + "\"authenticatorData\":\"AAAA\","
+                                + "\"clientDataJSON\":\"AAAA\","
+                                + "\"signature\":\"AAAA\","
+                                + "\"userHandle\":null}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.valid").value(false));
+    }
+
+    @Test
+    void webauthn_assert_verify_requires_the_verify_scope() throws Exception {
+        mockMvc.perform(post("/api/v1/mfa/internal/webauthn/assert/verify")
+                        .with(jwtForTenant("acme", "u-1"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{"
+                                + "\"challengeId\":\"" + java.util.UUID.randomUUID() + "\","
+                                + "\"credentialId\":\"AAAA\","
+                                + "\"authenticatorData\":\"AAAA\","
+                                + "\"clientDataJSON\":\"AAAA\","
+                                + "\"signature\":\"AAAA\"}"))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
     void totp_can_be_removed() throws Exception {
         String subject = "user-remove";
         mockMvc.perform(post("/api/v1/mfa/totp/enroll").with(jwtForTenant("acme", subject)))

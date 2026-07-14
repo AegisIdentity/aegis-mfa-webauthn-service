@@ -3,6 +3,11 @@ package io.aegis.mfa.service;
 import com.webauthn4j.WebAuthnManager;
 import com.webauthn4j.converter.AttestedCredentialDataConverter;
 import com.webauthn4j.converter.util.ObjectConverter;
+import com.webauthn4j.credential.CredentialRecord;
+import com.webauthn4j.credential.CredentialRecordImpl;
+import com.webauthn4j.data.AuthenticationData;
+import com.webauthn4j.data.AuthenticationParameters;
+import com.webauthn4j.data.AuthenticationRequest;
 import com.webauthn4j.data.RegistrationData;
 import com.webauthn4j.data.RegistrationParameters;
 import com.webauthn4j.data.RegistrationRequest;
@@ -16,12 +21,15 @@ import io.aegis.mfa.domain.WebAuthnChallenge;
 import io.aegis.mfa.domain.WebAuthnChallengeRepository;
 import io.aegis.mfa.domain.WebAuthnCredential;
 import io.aegis.mfa.domain.WebAuthnCredentialRepository;
+import io.aegis.mfa.web.MfaDtos.AssertOptionsResponse;
+import io.aegis.mfa.web.MfaDtos.AssertVerifyResponse;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -150,6 +158,124 @@ public class WebAuthnService {
                 tenantId, subject, credentialId, serializedAcd, signCount, safeLabel, aaguid));
         challenges.delete(stored);
         return saved;
+    }
+
+    /**
+     * Begin a usernameless (discoverable-credential) passkey login. We do not yet know which user is
+     * signing in, so the challenge is persisted with a placeholder subject ("*") and the given tenant
+     * (or "*" when blank) — the real (tenant, subject) is resolved from the credential at verify time.
+     * The saved entity's UUID id is the opaque {@code challengeId} the browser echoes back.
+     */
+    @Transactional
+    public AssertOptionsResponse startAssertion(String tenant) {
+        String tenantId = (tenant == null || tenant.isBlank()) ? "*" : tenant.strip();
+        byte[] challengeBytes = randomBytes(32);
+        String challengeB64 = B64URL.encodeToString(challengeBytes);
+        WebAuthnChallenge saved = challenges.save(new WebAuthnChallenge(
+                tenantId, "*", challengeB64, WebAuthnChallenge.Type.ASSERTION,
+                Instant.now().plusSeconds(props.getWebauthn().getChallengeTtlSeconds())));
+        return new AssertOptionsResponse(
+                saved.getId().toString(),
+                challengeB64,
+                props.getWebauthn().getRpId(),
+                props.getWebauthn().getChallengeTtlSeconds() * 1000,
+                "preferred",
+                List.of());
+    }
+
+    /**
+     * Verify a passkey assertion (the {@code navigator.credentials.get} response) against the stored
+     * one-time challenge and this RP's origin/id, using webauthn4j. Any failure — missing/expired
+     * challenge, unknown credential, bad signature, replayed counter, wrong origin/rpId — returns
+     * {@code valid:false} and never leaks a reason (a failed assertion is never a 500).
+     *
+     * <p>On success the signature counter is advanced, the challenge is consumed (one-time), and the
+     * credential's owning (tenant, subject) is returned so the authorization-server can complete login.
+     */
+    @Transactional
+    public AssertVerifyResponse verifyAssertion(String challengeId, String credentialIdB64,
+                                                String authenticatorDataB64, String clientDataJsonB64,
+                                                String signatureB64, String userHandleB64) {
+        UUID challengePk;
+        try {
+            challengePk = UUID.fromString(challengeId);
+        } catch (RuntimeException ex) {
+            return failed();
+        }
+
+        Optional<WebAuthnChallenge> challengeOpt = challenges.findById(challengePk);
+        if (challengeOpt.isEmpty()) {
+            return failed();
+        }
+        WebAuthnChallenge stored = challengeOpt.get();
+        if (stored.getType() != WebAuthnChallenge.Type.ASSERTION || stored.isExpired(Instant.now())) {
+            challenges.delete(stored);
+            return failed();
+        }
+
+        Optional<WebAuthnCredential> credOpt = credentials.findByCredentialId(credentialIdB64);
+        if (credOpt.isEmpty()) {
+            challenges.delete(stored);
+            return failed();
+        }
+        WebAuthnCredential cred = credOpt.get();
+
+        try {
+            byte[] credentialId = B64URL_DEC.decode(credentialIdB64);
+            byte[] userHandle = (userHandleB64 == null || userHandleB64.isBlank())
+                    ? null : B64URL_DEC.decode(userHandleB64);
+            byte[] authenticatorData = B64URL_DEC.decode(authenticatorDataB64);
+            byte[] clientDataJson = B64URL_DEC.decode(clientDataJsonB64);
+            byte[] signature = B64URL_DEC.decode(signatureB64);
+
+            AuthenticationRequest request = new AuthenticationRequest(
+                    credentialId, userHandle, authenticatorData, clientDataJson, signature);
+            AuthenticationData authenticationData = webAuthnManager.parse(request);
+
+            AttestedCredentialData acd = new AttestedCredentialDataConverter(objectConverter)
+                    .convert(cred.getPublicKeyCose());
+            // Reconstruct the stored credential. Only the counter + attested credential data (the public
+            // key) matter for assertion verification; attestation/uv/backup/extensions/clientData are not
+            // required and are supplied as null (non-strict manager, as at registration).
+            CredentialRecord credentialRecord = new CredentialRecordImpl(
+                    null,               // attestationStatement
+                    null,               // uvInitialized
+                    null,               // backupEligible
+                    null,               // backupState
+                    cred.getSignCount(),// counter
+                    acd,                // attested credential data (holds the COSE public key)
+                    null,               // authenticator extensions
+                    null,               // collected client data
+                    null,               // client extensions
+                    null);              // transports
+
+            Challenge challenge = new DefaultChallenge(B64URL_DEC.decode(stored.getChallenge()));
+            ServerProperty serverProperty = new ServerProperty(origins(), props.getWebauthn().getRpId(), challenge, null);
+            AuthenticationParameters params = new AuthenticationParameters(
+                    serverProperty,
+                    credentialRecord,
+                    null,   // allowCredentials (usernameless)
+                    false,  // userVerificationRequired
+                    true);  // userPresenceRequired
+
+            AuthenticationData verified = webAuthnManager.verify(authenticationData, params);
+
+            long newCount = verified.getAuthenticatorData().getSignCount();
+            cred.setSignCount(newCount);
+            cred.setLastUsedAt(Instant.now());
+            credentials.save(cred);
+            challenges.delete(stored);
+            return new AssertVerifyResponse(true, cred.getTenantId(), cred.getSubject());
+        } catch (RuntimeException ex) {
+            // Do not leak the reason; a failed assertion is a `valid:false`, not an error. The challenge
+            // is consumed so it cannot be replayed.
+            challenges.delete(stored);
+            return failed();
+        }
+    }
+
+    private static AssertVerifyResponse failed() {
+        return new AssertVerifyResponse(false, null, null);
     }
 
     public List<WebAuthnCredential> list(String tenantId, String subject) {

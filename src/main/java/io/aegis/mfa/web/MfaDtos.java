@@ -64,4 +64,44 @@ public final class MfaDtos {
 
     public record ValidateResponse(boolean valid) {
     }
+
+    // --- Internal passwordless WebAuthn assertion (login-with-passkey, called by the authorization-server) ---
+
+    /**
+     * Begin a usernameless passkey login. {@code tenant} is optional (reserved for future tenant-scoped
+     * discovery); when blank the challenge is minted tenant-agnostic and the tenant is resolved from the
+     * credential at verify time.
+     */
+    public record AssertOptionsRequest(String tenant) {
+    }
+
+    /**
+     * PublicKeyCredentialRequestOptions the browser passes to {@code navigator.credentials.get}.
+     * {@code allowCredentials} is empty (discoverable/usernameless). {@code timeout} is milliseconds.
+     */
+    public record AssertOptionsResponse(
+            String challengeId,
+            String challenge,
+            String rpId,
+            long timeout,
+            String userVerification,
+            List<Object> allowCredentials) {
+    }
+
+    /**
+     * The assertion from {@code navigator.credentials.get}. All byte fields are base64url (the browser's
+     * ArrayBuffers). {@code userHandle} may be null for a non-discoverable credential.
+     */
+    public record AssertVerifyRequest(
+            @NotBlank String challengeId,
+            @NotBlank String credentialId,
+            @NotBlank String authenticatorData,
+            @NotBlank String clientDataJSON,
+            @NotBlank String signature,
+            String userHandle) {
+    }
+
+    /** Assertion outcome. On success carries the resolved {@code tenant} + {@code subject}; both null on failure. */
+    public record AssertVerifyResponse(boolean valid, String tenant, String subject) {
+    }
 }

@@ -3,6 +3,10 @@ package io.aegis.mfa.web;
 import io.aegis.mfa.service.TotpService;
 import io.aegis.mfa.service.TotpService.Enrollment;
 import io.aegis.mfa.service.WebAuthnService;
+import io.aegis.mfa.web.MfaDtos.AssertOptionsRequest;
+import io.aegis.mfa.web.MfaDtos.AssertOptionsResponse;
+import io.aegis.mfa.web.MfaDtos.AssertVerifyRequest;
+import io.aegis.mfa.web.MfaDtos.AssertVerifyResponse;
 import io.aegis.mfa.web.MfaDtos.InternalEnrollRequest;
 import io.aegis.mfa.web.MfaDtos.StepUpStatus;
 import io.aegis.mfa.web.MfaDtos.TotpEnrollResponse;
@@ -77,5 +81,28 @@ public class InternalMfaController {
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void verifyEnableTotp(@Valid @RequestBody TotpValidateRequest request) {
         totp.verifyAndEnable(request.tenant(), request.subject(), request.code());
+    }
+
+    /**
+     * Begin a passwordless passkey login: mint a one-time assertion challenge (usernameless — we do not
+     * yet know the user). The AS relays the returned options to the browser's
+     * {@code navigator.credentials.get}.
+     */
+    @PostMapping("/webauthn/assert/options")
+    public AssertOptionsResponse assertOptions(@RequestBody(required = false) AssertOptionsRequest request) {
+        String tenant = request == null ? null : request.tenant();
+        return webauthn.startAssertion(tenant);
+    }
+
+    /**
+     * Complete a passwordless passkey login: verify the assertion. Any verification failure surfaces as
+     * {@code valid:false} (never a 500) so login can fall through cleanly; on success the resolved
+     * (tenant, subject) is returned for the AS to complete the login.
+     */
+    @PostMapping("/webauthn/assert/verify")
+    public AssertVerifyResponse assertVerify(@Valid @RequestBody AssertVerifyRequest request) {
+        return webauthn.verifyAssertion(request.challengeId(), request.credentialId(),
+                request.authenticatorData(), request.clientDataJSON(),
+                request.signature(), request.userHandle());
     }
 }
