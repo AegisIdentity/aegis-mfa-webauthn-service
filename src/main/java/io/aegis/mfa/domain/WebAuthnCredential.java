@@ -3,7 +3,6 @@ package io.aegis.mfa.domain;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
-import jakarta.persistence.Lob;
 import jakarta.persistence.Table;
 import jakarta.persistence.UniqueConstraint;
 import java.time.Instant;
@@ -33,9 +32,13 @@ public class WebAuthnCredential {
     @Column(name = "credential_id", nullable = false, length = 512)
     private String credentialId;
 
-    /** CBOR-encoded COSE public key, as extracted from the attestation during registration. */
-    @Lob
-    @Column(name = "public_key_cose", nullable = false)
+    /**
+     * CBOR-encoded COSE public key, as extracted from the attestation during registration. Stored as
+     * {@code bytea} (small binary), NOT a large object — {@code @Lob byte[]} maps to a Postgres {@code oid}
+     * which can only be read inside a transaction (fails auto-commit reads like the factors list) and
+     * leaks orphaned large objects on delete.
+     */
+    @Column(name = "public_key_cose", nullable = false, columnDefinition = "bytea")
     private byte[] publicKeyCose;
 
     @Column(name = "sign_count", nullable = false)
