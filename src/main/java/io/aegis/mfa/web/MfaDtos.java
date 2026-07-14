@@ -105,6 +105,37 @@ public final class MfaDtos {
     public record AssertVerifyResponse(boolean valid, String tenant, String subject) {
     }
 
+    // --- Internal tenant-app WebAuthn registration (driven by the authorization-server for a tenant's app) ---
+
+    /**
+     * Begin a tenant-app passkey registration on a user's behalf. The AS supplies the (tenant, subject) it
+     * is registering for; {@code userName}/{@code displayName} are what the authenticator shows the user.
+     * The options are built against the tenant's OWN RP config.
+     */
+    public record InternalRegisterOptionsRequest(
+            @NotBlank String tenant,
+            @NotBlank String subject,
+            @NotBlank String userName,
+            @NotBlank String displayName) {
+    }
+
+    /**
+     * Finish a tenant-app passkey registration. The two byte fields are base64url (the browser's
+     * ArrayBuffers); the attestation is verified against the tenant's OWN rpId + origins. {@code label} is
+     * optional (defaults to "Passkey").
+     */
+    public record InternalRegisterFinishRequest(
+            @NotBlank String tenant,
+            @NotBlank String subject,
+            @NotBlank String attestationObject,
+            @NotBlank String clientDataJSON,
+            String label) {
+    }
+
+    /** The stored tenant-app passkey after a successful internal registration. */
+    public record InternalRegisterFinishResponse(String id, String label, String credentialId) {
+    }
+
     // --- Per-tenant WebAuthn RP config (tenant-admin) ---
 
     /** A tenant's effective WebAuthn RP configuration (the stored row, or global defaults when absent). */

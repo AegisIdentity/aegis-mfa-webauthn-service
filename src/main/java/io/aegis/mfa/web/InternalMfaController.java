@@ -1,5 +1,6 @@
 package io.aegis.mfa.web;
 
+import io.aegis.mfa.domain.WebAuthnCredential;
 import io.aegis.mfa.service.TotpService;
 import io.aegis.mfa.service.TotpService.Enrollment;
 import io.aegis.mfa.service.WebAuthnService;
@@ -8,6 +9,9 @@ import io.aegis.mfa.web.MfaDtos.AssertOptionsResponse;
 import io.aegis.mfa.web.MfaDtos.AssertVerifyRequest;
 import io.aegis.mfa.web.MfaDtos.AssertVerifyResponse;
 import io.aegis.mfa.web.MfaDtos.InternalEnrollRequest;
+import io.aegis.mfa.web.MfaDtos.InternalRegisterFinishRequest;
+import io.aegis.mfa.web.MfaDtos.InternalRegisterFinishResponse;
+import io.aegis.mfa.web.MfaDtos.InternalRegisterOptionsRequest;
 import io.aegis.mfa.web.MfaDtos.StepUpStatus;
 import io.aegis.mfa.web.MfaDtos.TotpEnrollResponse;
 import io.aegis.mfa.web.MfaDtos.TotpValidateRequest;
@@ -15,6 +19,7 @@ import io.aegis.mfa.web.MfaDtos.ValidateResponse;
 import jakarta.validation.Valid;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -104,5 +109,30 @@ public class InternalMfaController {
         return webauthn.verifyAssertion(request.challengeId(), request.credentialId(),
                 request.authenticatorData(), request.clientDataJSON(),
                 request.signature(), request.userHandle());
+    }
+
+    /**
+     * Begin a tenant-app passkey registration on a user's behalf: mint + persist a one-time challenge and
+     * return PublicKeyCredentialCreationOptions built against the tenant's OWN RP config (rpId/rpName +
+     * authenticator-selection policy). The AS relays these to the browser's {@code navigator.credentials.create}.
+     */
+    @PostMapping("/webauthn/register/options")
+    public Map<String, Object> registerOptions(@Valid @RequestBody InternalRegisterOptionsRequest request) {
+        return webauthn.startRegistrationForTenant(request.tenant(), request.subject(),
+                request.userName(), request.displayName());
+    }
+
+    /**
+     * Complete a tenant-app passkey registration: verify the attestation against the tenant's OWN rpId +
+     * origins and store the credential. A wrong/expired challenge surfaces as 400 via
+     * {@code MfaExceptionHandler}. Returns the stored passkey's id, label, and credentialId.
+     */
+    @PostMapping("/webauthn/register/finish")
+    @ResponseStatus(HttpStatus.CREATED)
+    public InternalRegisterFinishResponse registerFinish(@Valid @RequestBody InternalRegisterFinishRequest request) {
+        WebAuthnCredential saved = webauthn.finishRegistrationForTenant(request.tenant(), request.subject(),
+                request.attestationObject(), request.clientDataJSON(), request.label());
+        return new InternalRegisterFinishResponse(
+                saved.getId().toString(), saved.getLabel(), saved.getCredentialId());
     }
 }

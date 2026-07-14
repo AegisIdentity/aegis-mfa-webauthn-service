@@ -468,4 +468,123 @@ class MfaIT {
                 .andExpect(jsonPath("$[1].action").value("PASSKEY_REGISTERED"))
                 .andExpect(jsonPath("$[1].aaguid").value("aaguid-1"));
     }
+
+    // --- Feature 3: tenant-app WebAuthn ceremony uses the tenant's OWN RP config ---
+
+    /** PUT a custom RP config for a tenant, as a tenant:admin would during setup. */
+    private void putCustomConfig(String tenant, String rpId, String origin) throws Exception {
+        mockMvc.perform(put("/api/v1/mfa/webauthn/config")
+                        .with(jwtForTenant(tenant, "admin", "tenant:admin"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"rpId\":\"" + rpId + "\",\"origins\":[\"" + origin + "\"]}"))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void internal_register_options_use_the_tenants_own_rp_when_configured() throws Exception {
+        String tenant = "rp-custom";
+        putCustomConfig(tenant, "acme.example.com", "https://app.acme.com");
+
+        // The AS (mfa:verify) drives registration for the tenant's app; options carry the tenant's rpId.
+        mockMvc.perform(post("/api/v1/mfa/internal/webauthn/register/options")
+                        .with(jwtForTenant("platform", "as-svc", "mfa:verify"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tenant\":\"" + tenant + "\",\"subject\":\"u-1\","
+                                + "\"userName\":\"alice@acme.com\",\"displayName\":\"Alice\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rp.id").value("acme.example.com"))
+                .andExpect(jsonPath("$.user.name").value("alice@acme.com"))
+                .andExpect(jsonPath("$.user.displayName").value("Alice"))
+                .andExpect(jsonPath("$.challenge").isNotEmpty())
+                .andExpect(jsonPath("$.pubKeyCredParams[0].alg").value(-7));
+    }
+
+    @Test
+    void internal_register_options_fall_back_to_global_rp_for_a_plain_tenant() throws Exception {
+        // A tenant with no custom config gets the global rpId (localhost) — hosted behaviour is unchanged.
+        mockMvc.perform(post("/api/v1/mfa/internal/webauthn/register/options")
+                        .with(jwtForTenant("platform", "as-svc", "mfa:verify"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tenant\":\"rp-plain\",\"subject\":\"u-2\","
+                                + "\"userName\":\"bob\",\"displayName\":\"Bob\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rp.id").value("localhost"));
+    }
+
+    @Test
+    void internal_register_options_require_the_verify_scope() throws Exception {
+        // A self-service token (no mfa:verify) must not reach the internal registration endpoint.
+        mockMvc.perform(post("/api/v1/mfa/internal/webauthn/register/options")
+                        .with(jwtForTenant("rp-custom", "u-1"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tenant\":\"rp-custom\",\"subject\":\"u-1\","
+                                + "\"userName\":\"a\",\"displayName\":\"A\"}"))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void internal_register_options_require_a_token() throws Exception {
+        mockMvc.perform(post("/api/v1/mfa/internal/webauthn/register/options")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tenant\":\"rp-custom\",\"subject\":\"u-1\","
+                                + "\"userName\":\"a\",\"displayName\":\"A\"}"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void internal_register_finish_without_a_challenge_is_a_400() throws Exception {
+        // No register/options was called for this (tenant, subject), so there is no challenge in progress:
+        // the finish ceremony (structurally exercised) rejects it as a 400 via MfaExceptionHandler.
+        mockMvc.perform(post("/api/v1/mfa/internal/webauthn/register/finish")
+                        .with(jwtForTenant("platform", "as-svc", "mfa:verify"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tenant\":\"rp-custom\",\"subject\":\"no-challenge\","
+                                + "\"attestationObject\":\"AAAA\",\"clientDataJSON\":\"AAAA\",\"label\":\"Test\"}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void internal_register_finish_with_a_bad_attestation_is_a_400() throws Exception {
+        // Mint a real registration challenge, then present garbage attestation bytes -> the webauthn4j
+        // verification fails and surfaces as a 400 (the crypto path is exercised structurally).
+        String tenant = "rp-finish";
+        putCustomConfig(tenant, "finish.example.com", "https://finish.example.com");
+        mockMvc.perform(post("/api/v1/mfa/internal/webauthn/register/options")
+                        .with(jwtForTenant("platform", "as-svc", "mfa:verify"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tenant\":\"" + tenant + "\",\"subject\":\"u-fin\","
+                                + "\"userName\":\"a\",\"displayName\":\"A\"}"))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(post("/api/v1/mfa/internal/webauthn/register/finish")
+                        .with(jwtForTenant("platform", "as-svc", "mfa:verify"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tenant\":\"" + tenant + "\",\"subject\":\"u-fin\","
+                                + "\"attestationObject\":\"AAAA\",\"clientDataJSON\":\"AAAA\",\"label\":\"Test\"}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void internal_register_finish_requires_the_verify_scope() throws Exception {
+        mockMvc.perform(post("/api/v1/mfa/internal/webauthn/register/finish")
+                        .with(jwtForTenant("rp-custom", "u-1"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tenant\":\"rp-custom\",\"subject\":\"u-1\","
+                                + "\"attestationObject\":\"AAAA\",\"clientDataJSON\":\"AAAA\"}"))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void internal_assert_options_use_the_tenants_own_rp_when_configured() throws Exception {
+        String tenant = "rp-assert";
+        putCustomConfig(tenant, "assert.example.com", "https://assert.example.com");
+
+        mockMvc.perform(post("/api/v1/mfa/internal/webauthn/assert/options")
+                        .with(jwtForTenant("platform", "as-svc", "mfa:verify"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tenant\":\"" + tenant + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rpId").value("assert.example.com"))
+                .andExpect(jsonPath("$.challengeId").isNotEmpty());
+    }
 }

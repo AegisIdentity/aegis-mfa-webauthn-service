@@ -22,6 +22,7 @@ import io.aegis.mfa.domain.WebAuthnChallenge;
 import io.aegis.mfa.domain.WebAuthnChallengeRepository;
 import io.aegis.mfa.domain.WebAuthnCredential;
 import io.aegis.mfa.domain.WebAuthnCredentialRepository;
+import io.aegis.mfa.domain.WebAuthnTenantConfig;
 import io.aegis.mfa.web.MfaDtos.AssertOptionsResponse;
 import io.aegis.mfa.web.MfaDtos.AssertVerifyResponse;
 import java.security.SecureRandom;
@@ -60,20 +61,64 @@ public class WebAuthnService {
     private final WebAuthnChallengeRepository challenges;
     private final MfaProperties props;
     private final WebAuthnAuditService audit;
+    private final WebAuthnConfigService configService;
     private final WebAuthnManager webAuthnManager;
     private final ObjectConverter objectConverter;
 
     public WebAuthnService(WebAuthnCredentialRepository credentials,
                            WebAuthnChallengeRepository challenges,
                            MfaProperties props,
-                           WebAuthnAuditService audit) {
+                           WebAuthnAuditService audit,
+                           WebAuthnConfigService configService) {
         this.credentials = credentials;
         this.challenges = challenges;
         this.props = props;
         this.audit = audit;
+        this.configService = configService;
         this.objectConverter = new ObjectConverter();
         // Non-strict: do not require an attestation trust-anchor chain (passkeys use `none`).
         this.webAuthnManager = WebAuthnManager.createNonStrictWebAuthnManager(objectConverter);
+    }
+
+    /**
+     * The resolved Relying Party a ceremony runs against: {@code rpId} + {@code rpName} + the set of
+     * accepted {@code origins} (what webauthn4j's {@code ServerProperty} checks), plus the four policy
+     * knobs that shape the options JSON. Built from the GLOBAL {@link MfaProperties} for the Aegis-hosted
+     * self-service flow ({@link #globalRp()}), or from a tenant's own {@link WebAuthnTenantConfig} for the
+     * internal tenant-app flow ({@link #effectiveRp(String)}).
+     */
+    record EffectiveRp(String rpId, String rpName, Set<Origin> origins,
+                       String userVerification, String residentKey,
+                       String authenticatorAttachment, String attestation) {
+    }
+
+    /**
+     * The GLOBAL RP, from {@link MfaProperties}. The four policy knobs mirror the values the self-service
+     * options have always emitted (residentKey/userVerification "preferred", attestation "none",
+     * authenticatorAttachment unconstrained), so the hosted flow is byte-for-byte unchanged.
+     */
+    private EffectiveRp globalRp() {
+        MfaProperties.WebAuthn cfg = props.getWebauthn();
+        Set<Origin> origins = cfg.getAllowedOrigins().stream().map(Origin::new).collect(Collectors.toSet());
+        return new EffectiveRp(cfg.getRpId(), cfg.getRpName(), origins,
+                "preferred", "preferred", "any", "none");
+    }
+
+    /**
+     * The RP for a tenant-app (embedded) flow: the tenant's OWN {@link WebAuthnTenantConfig} via
+     * {@link WebAuthnConfigService#effective(String)}. A blank/{@code "*"} tenant → the global RP, so the
+     * hosted flow is unchanged; {@code effective} itself falls back to global-seeded defaults for a tenant
+     * without a custom row, so a plain tenant still verifies against {@code localhost}.
+     */
+    EffectiveRp effectiveRp(String tenantId) {
+        if (tenantId == null || tenantId.isBlank() || "*".equals(tenantId)) {
+            return globalRp();
+        }
+        WebAuthnTenantConfig cfg = configService.effective(tenantId);
+        Set<Origin> origins = cfg.getOrigins().stream().map(Origin::new).collect(Collectors.toSet());
+        return new EffectiveRp(cfg.getRpId(), cfg.getRpName(), origins,
+                cfg.getUserVerification(), cfg.getResidentKey(),
+                cfg.getAuthenticatorAttachment(), cfg.getAttestation());
     }
 
     /**
@@ -83,6 +128,18 @@ public class WebAuthnService {
      */
     @Transactional
     public Map<String, Object> startRegistration(String tenantId, String subject, String userName, String displayName) {
+        // Self-service (My Security) — always the GLOBAL RP.
+        return startRegistration(tenantId, subject, userName, displayName, globalRp());
+    }
+
+    /**
+     * Start a registration ceremony against a specific resolved {@link EffectiveRp}. The self-service path
+     * passes the GLOBAL rp; the internal tenant-app path passes {@code effectiveRp(tenant)} so the options
+     * carry the tenant's own rpId/rpName and authenticator-selection policy.
+     */
+    @Transactional
+    Map<String, Object> startRegistration(String tenantId, String subject, String userName,
+                                          String displayName, EffectiveRp rp) {
         byte[] challengeBytes = randomBytes(32);
         String challengeB64 = B64URL.encodeToString(challengeBytes);
         challenges.deleteByTenantIdAndSubjectAndType(tenantId, subject, WebAuthnChallenge.Type.REGISTRATION);
@@ -90,7 +147,6 @@ public class WebAuthnService {
                 WebAuthnChallenge.Type.REGISTRATION,
                 Instant.now().plusSeconds(props.getWebauthn().getChallengeTtlSeconds())));
 
-        MfaProperties.WebAuthn cfg = props.getWebauthn();
         // User handle: a stable per-user id (the subject) — never PII, so it is safe on the authenticator.
         String userHandle = B64URL.encodeToString(subject.getBytes(java.nio.charset.StandardCharsets.UTF_8));
 
@@ -99,17 +155,24 @@ public class WebAuthnService {
                 .map(c -> descriptor(c.getCredentialId()))
                 .collect(Collectors.toList());
 
+        Map<String, Object> authenticatorSelection = new LinkedHashMap<>();
+        authenticatorSelection.put("residentKey", rp.residentKey());
+        authenticatorSelection.put("userVerification", rp.userVerification());
+        // "any" means "no attachment constraint" — omit the key entirely (a browser rejects "any").
+        if (!"any".equals(rp.authenticatorAttachment())) {
+            authenticatorSelection.put("authenticatorAttachment", rp.authenticatorAttachment());
+        }
+
         Map<String, Object> options = new LinkedHashMap<>();
         options.put("challenge", challengeB64);
-        options.put("rp", Map.of("id", cfg.getRpId(), "name", cfg.getRpName()));
+        options.put("rp", Map.of("id", rp.rpId(), "name", rp.rpName()));
         options.put("user", Map.of("id", userHandle, "name", userName, "displayName", displayName));
         options.put("pubKeyCredParams", List.of(
                 Map.of("type", "public-key", "alg", -7),    // ES256
                 Map.of("type", "public-key", "alg", -257))); // RS256
         options.put("timeout", props.getWebauthn().getChallengeTtlSeconds() * 1000);
-        options.put("attestation", "none");
-        options.put("authenticatorSelection", Map.of(
-                "residentKey", "preferred", "userVerification", "preferred"));
+        options.put("attestation", rp.attestation());
+        options.put("authenticatorSelection", authenticatorSelection);
         options.put("excludeCredentials", exclude);
         return options;
     }
@@ -123,6 +186,19 @@ public class WebAuthnService {
     public WebAuthnCredential finishRegistration(String tenantId, String subject,
                                                  String attestationObjectB64, String clientDataJsonB64,
                                                  String label) {
+        // Self-service (My Security) — always verify against the GLOBAL RP.
+        return finishRegistration(tenantId, subject, attestationObjectB64, clientDataJsonB64, label, globalRp());
+    }
+
+    /**
+     * Complete registration against a specific resolved {@link EffectiveRp}. The self-service path passes
+     * the GLOBAL rp; the internal tenant-app path passes {@code effectiveRp(tenant)} so the attestation is
+     * verified against the tenant's own rpId + origins.
+     */
+    @Transactional
+    WebAuthnCredential finishRegistration(String tenantId, String subject,
+                                          String attestationObjectB64, String clientDataJsonB64,
+                                          String label, EffectiveRp rp) {
         WebAuthnChallenge stored = challenges
                 .findFirstByTenantIdAndSubjectAndTypeOrderByExpiresAtDesc(
                         tenantId, subject, WebAuthnChallenge.Type.REGISTRATION)
@@ -135,7 +211,7 @@ public class WebAuthnService {
         byte[] attestationObject = B64URL_DEC.decode(attestationObjectB64);
         byte[] clientDataJson = B64URL_DEC.decode(clientDataJsonB64);
         Challenge challenge = new DefaultChallenge(B64URL_DEC.decode(stored.getChallenge()));
-        ServerProperty serverProperty = new ServerProperty(origins(), props.getWebauthn().getRpId(), challenge, null);
+        ServerProperty serverProperty = new ServerProperty(rp.origins(), rp.rpId(), challenge, null);
 
         AttestedCredentialData acd;
         long signCount;
@@ -174,6 +250,9 @@ public class WebAuthnService {
     @Transactional
     public AssertOptionsResponse startAssertion(String tenant) {
         String tenantId = (tenant == null || tenant.isBlank()) ? "*" : tenant.strip();
+        // Resolve the RP from the tenant's own config; a blank/"*" tenant → global defaults (unchanged
+        // hosted behaviour). A custom-config tenant gets its own rpId + userVerification in the options.
+        EffectiveRp rp = effectiveRp(tenantId);
         byte[] challengeBytes = randomBytes(32);
         String challengeB64 = B64URL.encodeToString(challengeBytes);
         WebAuthnChallenge saved = challenges.save(new WebAuthnChallenge(
@@ -182,9 +261,9 @@ public class WebAuthnService {
         return new AssertOptionsResponse(
                 saved.getId().toString(),
                 challengeB64,
-                props.getWebauthn().getRpId(),
+                rp.rpId(),
                 props.getWebauthn().getChallengeTtlSeconds() * 1000,
-                "preferred",
+                rp.userVerification(),
                 List.of());
     }
 
@@ -257,7 +336,12 @@ public class WebAuthnService {
                     null);              // transports
 
             Challenge challenge = new DefaultChallenge(B64URL_DEC.decode(stored.getChallenge()));
-            ServerProperty serverProperty = new ServerProperty(origins(), props.getWebauthn().getRpId(), challenge, null);
+            // Verify against the RP the credential was registered under — the credential's OWNING tenant's
+            // config, not the global props. `effectiveRp` returns global defaults for a tenant without a
+            // custom row, so a hosted-flow passkey (registered under `localhost`) still verifies; a
+            // tenant-app passkey registered under the tenant's own rpId now verifies correctly.
+            EffectiveRp rp = effectiveRp(cred.getTenantId());
+            ServerProperty serverProperty = new ServerProperty(rp.origins(), rp.rpId(), challenge, null);
             AuthenticationParameters params = new AuthenticationParameters(
                     serverProperty,
                     credentialRecord,
@@ -307,10 +391,30 @@ public class WebAuthnService {
         audit.record(tenantId, subject, WebAuthnAuditEvent.PASSKEY_REMOVED, credentialId, aaguid, null);
     }
 
-    private Set<Origin> origins() {
-        return props.getWebauthn().getAllowedOrigins().stream()
-                .map(Origin::new)
-                .collect(Collectors.toSet());
+    // --- Internal (server-to-server) tenant-app registration: uses the tenant's OWN RP config ---
+
+    /**
+     * Start a registration for a tenant-app (embedded) flow, driven by the authorization-server on behalf
+     * of the tenant. Builds the options against the tenant's OWN {@link EffectiveRp} (rpId, rpName,
+     * authenticator-selection from residentKey/userVerification/authenticatorAttachment, attestation).
+     */
+    @Transactional
+    public Map<String, Object> startRegistrationForTenant(String tenantId, String subject,
+                                                          String userName, String displayName) {
+        return startRegistration(tenantId, subject, userName, displayName, effectiveRp(tenantId));
+    }
+
+    /**
+     * Complete a tenant-app registration: verify the attestation against the tenant's OWN
+     * {@link EffectiveRp} (rpId + origins) and persist the credential. A wrong/expired challenge surfaces
+     * as a 400 via {@link MfaExceptions.InvalidVerificationException}.
+     */
+    @Transactional
+    public WebAuthnCredential finishRegistrationForTenant(String tenantId, String subject,
+                                                         String attestationObjectB64, String clientDataJsonB64,
+                                                         String label) {
+        return finishRegistration(tenantId, subject, attestationObjectB64, clientDataJsonB64,
+                label, effectiveRp(tenantId));
     }
 
     private static Map<String, Object> descriptor(String credentialIdB64) {
