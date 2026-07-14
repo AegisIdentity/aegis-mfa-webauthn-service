@@ -129,6 +129,64 @@ class MfaIT {
     }
 
     @Test
+    void internal_force_enrol_lifecycle() throws Exception {
+        String tenant = "acme";
+        String subject = "user-force-enrol";
+
+        // Without the mfa:verify scope, force-enrol is forbidden.
+        mockMvc.perform(post("/api/v1/mfa/internal/totp/enroll")
+                        .with(jwtForTenant(tenant, subject))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tenant\":\"" + tenant + "\",\"subject\":\"" + subject
+                                + "\",\"account\":\"" + subject + "\"}"))
+                .andExpect(status().isForbidden());
+
+        // With no token at all, unauthorized.
+        mockMvc.perform(post("/api/v1/mfa/internal/totp/enroll")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tenant\":\"" + tenant + "\",\"subject\":\"" + subject
+                                + "\",\"account\":\"" + subject + "\"}"))
+                .andExpect(status().isUnauthorized());
+
+        // 1) The AS service token (mfa:verify) force-enrols on the user's behalf: gets a secret. Not yet enabled.
+        String enrollBody = mockMvc.perform(post("/api/v1/mfa/internal/totp/enroll")
+                        .with(jwtForTenant("platform", "as-svc", "mfa:verify"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tenant\":\"" + tenant + "\",\"subject\":\"" + subject
+                                + "\",\"account\":\"" + subject + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.secret").isNotEmpty())
+                .andExpect(jsonPath("$.otpauthUri", org.hamcrest.Matchers.startsWith("otpauth://totp/")))
+                .andReturn().getResponse().getContentAsString();
+        String secret = JsonPath.read(enrollBody, "$.secret");
+
+        // 2) A wrong code at verify-enable is rejected with 400 (not caught by the controller).
+        mockMvc.perform(post("/api/v1/mfa/internal/totp/verify-enable")
+                        .with(jwtForTenant("platform", "as-svc", "mfa:verify"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tenant\":\"" + tenant + "\",\"subject\":\"" + subject
+                                + "\",\"code\":\"000000\"}"))
+                .andExpect(status().isBadRequest());
+
+        // 3) A live code confirms the enrolment and activates the factor -> 204.
+        String code = TotpGenerator.code(secret, System.currentTimeMillis(), 6, 30);
+        mockMvc.perform(post("/api/v1/mfa/internal/totp/verify-enable")
+                        .with(jwtForTenant("platform", "as-svc", "mfa:verify"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tenant\":\"" + tenant + "\",\"subject\":\"" + subject
+                                + "\",\"code\":\"" + code + "\"}"))
+                .andExpect(status().isNoContent());
+
+        // 4) Status now reports the user enrolled with TOTP.
+        mockMvc.perform(get("/api/v1/mfa/internal/status")
+                        .param("tenant", tenant).param("subject", subject)
+                        .with(jwtForTenant("platform", "as-svc", "mfa:verify")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.enrolled").value(true))
+                .andExpect(jsonPath("$.methods[0]").value("totp"));
+    }
+
+    @Test
     void totp_is_tenant_isolated() throws Exception {
         String subject = "shared-subject";
         // Enrol + enable in tenant A.

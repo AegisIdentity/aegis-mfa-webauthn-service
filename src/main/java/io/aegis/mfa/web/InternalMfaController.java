@@ -1,18 +1,23 @@
 package io.aegis.mfa.web;
 
 import io.aegis.mfa.service.TotpService;
+import io.aegis.mfa.service.TotpService.Enrollment;
 import io.aegis.mfa.service.WebAuthnService;
+import io.aegis.mfa.web.MfaDtos.InternalEnrollRequest;
 import io.aegis.mfa.web.MfaDtos.StepUpStatus;
+import io.aegis.mfa.web.MfaDtos.TotpEnrollResponse;
 import io.aegis.mfa.web.MfaDtos.TotpValidateRequest;
 import io.aegis.mfa.web.MfaDtos.ValidateResponse;
 import jakarta.validation.Valid;
 import java.util.ArrayList;
 import java.util.List;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -51,5 +56,26 @@ public class InternalMfaController {
     public ValidateResponse validateTotp(@Valid @RequestBody TotpValidateRequest request) {
         boolean valid = totp.validate(request.tenant(), request.subject(), request.code());
         return new ValidateResponse(valid);
+    }
+
+    /**
+     * Force-enrol: mint (or rotate) a <em>disabled</em> TOTP secret for a user the AS is enrolling
+     * mid-login. Confirm-before-activate — the secret is not a factor until {@link #verifyEnableTotp}
+     * confirms a live code.
+     */
+    @PostMapping("/totp/enroll")
+    public TotpEnrollResponse enrollTotp(@Valid @RequestBody InternalEnrollRequest request) {
+        Enrollment e = totp.enroll(request.tenant(), request.subject(), request.account());
+        return new TotpEnrollResponse(e.secret(), e.otpauthUri());
+    }
+
+    /**
+     * Confirm a force-enrolment by verifying the first live code, which activates the factor. A wrong
+     * code surfaces as 400 (no enrolment in progress → 404) via {@code MfaExceptionHandler}.
+     */
+    @PostMapping("/totp/verify-enable")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void verifyEnableTotp(@Valid @RequestBody TotpValidateRequest request) {
+        totp.verifyAndEnable(request.tenant(), request.subject(), request.code());
     }
 }

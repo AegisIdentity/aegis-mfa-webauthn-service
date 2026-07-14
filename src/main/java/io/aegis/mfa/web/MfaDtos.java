@@ -55,6 +55,13 @@ public final class MfaDtos {
             @NotBlank String code) {
     }
 
+    /** Force-enrol a TOTP secret on a user's behalf (the AS drives first-time enrolment during login). */
+    public record InternalEnrollRequest(
+            @NotBlank String tenant,
+            @NotBlank String subject,
+            @NotBlank String account) {
+    }
+
     public record ValidateResponse(boolean valid) {
     }
 }
