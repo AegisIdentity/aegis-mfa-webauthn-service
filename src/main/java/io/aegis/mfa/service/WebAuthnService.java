@@ -17,6 +17,7 @@ import com.webauthn4j.data.client.challenge.Challenge;
 import com.webauthn4j.data.client.challenge.DefaultChallenge;
 import com.webauthn4j.server.ServerProperty;
 import io.aegis.mfa.config.MfaProperties;
+import io.aegis.mfa.domain.WebAuthnAuditEvent;
 import io.aegis.mfa.domain.WebAuthnChallenge;
 import io.aegis.mfa.domain.WebAuthnChallengeRepository;
 import io.aegis.mfa.domain.WebAuthnCredential;
@@ -58,15 +59,18 @@ public class WebAuthnService {
     private final WebAuthnCredentialRepository credentials;
     private final WebAuthnChallengeRepository challenges;
     private final MfaProperties props;
+    private final WebAuthnAuditService audit;
     private final WebAuthnManager webAuthnManager;
     private final ObjectConverter objectConverter;
 
     public WebAuthnService(WebAuthnCredentialRepository credentials,
                            WebAuthnChallengeRepository challenges,
-                           MfaProperties props) {
+                           MfaProperties props,
+                           WebAuthnAuditService audit) {
         this.credentials = credentials;
         this.challenges = challenges;
         this.props = props;
+        this.audit = audit;
         this.objectConverter = new ObjectConverter();
         // Non-strict: do not require an attestation trust-anchor chain (passkeys use `none`).
         this.webAuthnManager = WebAuthnManager.createNonStrictWebAuthnManager(objectConverter);
@@ -157,6 +161,7 @@ public class WebAuthnService {
         WebAuthnCredential saved = credentials.save(new WebAuthnCredential(
                 tenantId, subject, credentialId, serializedAcd, signCount, safeLabel, aaguid));
         challenges.delete(stored);
+        audit.record(tenantId, subject, WebAuthnAuditEvent.PASSKEY_REGISTERED, credentialId, aaguid, saved.getLabel());
         return saved;
     }
 
@@ -216,6 +221,8 @@ public class WebAuthnService {
         Optional<WebAuthnCredential> credOpt = credentials.findByCredentialId(credentialIdB64);
         if (credOpt.isEmpty()) {
             challenges.delete(stored);
+            audit.record(stored.getTenantId(), null, WebAuthnAuditEvent.PASSKEY_ASSERT_FAILED,
+                    credentialIdB64, null, "unknown credential");
             return failed();
         }
         WebAuthnCredential cred = credOpt.get();
@@ -265,11 +272,15 @@ public class WebAuthnService {
             cred.setLastUsedAt(Instant.now());
             credentials.save(cred);
             challenges.delete(stored);
+            audit.record(cred.getTenantId(), cred.getSubject(), WebAuthnAuditEvent.PASSKEY_AUTHENTICATED,
+                    cred.getCredentialId(), cred.getAaguid(), null);
             return new AssertVerifyResponse(true, cred.getTenantId(), cred.getSubject());
         } catch (RuntimeException ex) {
             // Do not leak the reason; a failed assertion is a `valid:false`, not an error. The challenge
             // is consumed so it cannot be replayed.
             challenges.delete(stored);
+            audit.record(stored.getTenantId(), null, WebAuthnAuditEvent.PASSKEY_ASSERT_FAILED,
+                    credentialIdB64, null, "assertion verification failed");
             return failed();
         }
     }
@@ -290,7 +301,10 @@ public class WebAuthnService {
     public void remove(String tenantId, String subject, UUID id) {
         WebAuthnCredential cred = credentials.findByTenantIdAndSubjectAndId(tenantId, subject, id)
                 .orElseThrow(() -> new MfaExceptions.NotFoundException("no such passkey"));
+        String credentialId = cred.getCredentialId();
+        String aaguid = cred.getAaguid();
         credentials.delete(cred);
+        audit.record(tenantId, subject, WebAuthnAuditEvent.PASSKEY_REMOVED, credentialId, aaguid, null);
     }
 
     private Set<Origin> origins() {

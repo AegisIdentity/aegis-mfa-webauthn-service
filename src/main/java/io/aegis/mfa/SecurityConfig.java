@@ -36,6 +36,9 @@ public class SecurityConfig {
                         .requestMatchers("/api/v1/mfa/internal/**").hasAuthority("SCOPE_mfa:verify")
                         // Tenant-admin MFA reset.
                         .requestMatchers("/api/v1/mfa/admin/**").hasAuthority("SCOPE_mfa:admin")
+                        // Tenant-admin WebAuthn RP config + passkey audit (tenant taken from the token).
+                        .requestMatchers("/api/v1/mfa/webauthn/config").hasAuthority("SCOPE_tenant:admin")
+                        .requestMatchers("/api/v1/mfa/webauthn/audit").hasAuthority("SCOPE_tenant:admin")
                         // Self-service factor management — any authenticated caller, own subject only.
                         .requestMatchers("/api/v1/mfa/**").authenticated()
                         .anyRequest().authenticated())

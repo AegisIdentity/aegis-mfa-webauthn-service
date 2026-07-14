@@ -6,11 +6,14 @@ import static org.springframework.security.test.web.servlet.setup.SecurityMockMv
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.jayway.jsonpath.JsonPath;
+import io.aegis.mfa.domain.WebAuthnAuditEvent;
 import io.aegis.mfa.service.TotpGenerator;
+import io.aegis.mfa.service.WebAuthnAuditService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -32,6 +35,8 @@ class MfaIT {
 
     @Autowired
     WebApplicationContext context;
+    @Autowired
+    WebAuthnAuditService webAuthnAuditService;
     MockMvc mockMvc;
 
     @BeforeEach
@@ -329,5 +334,138 @@ class MfaIT {
         mockMvc.perform(get("/api/v1/mfa/factors").with(jwtForTenant("acme", subject)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.totp").doesNotExist());
+    }
+
+    // --- Feature 1: per-tenant WebAuthn RP config (tenant-admin) ---
+
+    @Test
+    void webauthn_config_requires_a_token() throws Exception {
+        mockMvc.perform(get("/api/v1/mfa/webauthn/config")).andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void webauthn_config_requires_tenant_admin_scope() throws Exception {
+        // A plain (non tenant:admin) token is authenticated but must not reach the admin config surface.
+        mockMvc.perform(get("/api/v1/mfa/webauthn/config").with(jwtForTenant("acme", "u-1")))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void webauthn_config_returns_global_defaults_when_absent() throws Exception {
+        mockMvc.perform(get("/api/v1/mfa/webauthn/config")
+                        .with(jwtForTenant("cfg-defaults", "admin", "tenant:admin")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rpId").value("localhost"))
+                .andExpect(jsonPath("$.rpName").value("Aegis"))
+                .andExpect(jsonPath("$.origins").isArray())
+                .andExpect(jsonPath("$.userVerification").value("preferred"))
+                .andExpect(jsonPath("$.authenticatorAttachment").value("any"))
+                .andExpect(jsonPath("$.residentKey").value("preferred"))
+                .andExpect(jsonPath("$.attestation").value("none"))
+                .andExpect(jsonPath("$.enabled").value(true));
+    }
+
+    @Test
+    void webauthn_config_can_be_upserted_and_read_back() throws Exception {
+        String tenant = "cfg-upsert";
+        mockMvc.perform(put("/api/v1/mfa/webauthn/config")
+                        .with(jwtForTenant(tenant, "admin", "tenant:admin"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"rpId\":\"acme.example.com\","
+                                + "\"rpName\":\"Acme\","
+                                + "\"origins\":[\"https://app.acme.com\"],"
+                                + "\"userVerification\":\"required\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rpId").value("acme.example.com"))
+                .andExpect(jsonPath("$.origins[0]").value("https://app.acme.com"))
+                .andExpect(jsonPath("$.userVerification").value("required"));
+
+        // GET reflects the saved config.
+        mockMvc.perform(get("/api/v1/mfa/webauthn/config")
+                        .with(jwtForTenant(tenant, "admin", "tenant:admin")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rpId").value("acme.example.com"))
+                .andExpect(jsonPath("$.origins[0]").value("https://app.acme.com"))
+                .andExpect(jsonPath("$.userVerification").value("required"));
+    }
+
+    @Test
+    void webauthn_config_rejects_an_invalid_user_verification() throws Exception {
+        mockMvc.perform(put("/api/v1/mfa/webauthn/config")
+                        .with(jwtForTenant("cfg-bad", "admin", "tenant:admin"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"rpId\":\"acme.example.com\","
+                                + "\"origins\":[\"https://app.acme.com\"],"
+                                + "\"userVerification\":\"sometimes\"}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void webauthn_config_rejects_a_blank_rp_id() throws Exception {
+        mockMvc.perform(put("/api/v1/mfa/webauthn/config")
+                        .with(jwtForTenant("cfg-blank", "admin", "tenant:admin"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"rpId\":\"\",\"origins\":[\"https://app.acme.com\"]}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void webauthn_config_is_tenant_scoped() throws Exception {
+        // Tenant A sets a custom rpId; tenant B still sees the global defaults.
+        mockMvc.perform(put("/api/v1/mfa/webauthn/config")
+                        .with(jwtForTenant("cfg-iso-a", "admin", "tenant:admin"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"rpId\":\"a.example.com\",\"origins\":[\"https://a.example.com\"]}"))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(get("/api/v1/mfa/webauthn/config")
+                        .with(jwtForTenant("cfg-iso-b", "admin", "tenant:admin")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rpId").value("localhost"));
+    }
+
+    // --- Feature 2: WebAuthn audit (tenant-admin) ---
+
+    @Test
+    void webauthn_audit_requires_a_token() throws Exception {
+        mockMvc.perform(get("/api/v1/mfa/webauthn/audit")).andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void webauthn_audit_requires_tenant_admin_scope() throws Exception {
+        mockMvc.perform(get("/api/v1/mfa/webauthn/audit").with(jwtForTenant("acme", "u-1")))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void webauthn_audit_returns_an_array() throws Exception {
+        mockMvc.perform(get("/api/v1/mfa/webauthn/audit")
+                        .with(jwtForTenant("audit-empty", "admin", "tenant:admin")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$").isArray());
+    }
+
+    @Test
+    void webauthn_audit_surfaces_recorded_events_newest_first_and_is_tenant_scoped() throws Exception {
+        String tenant = "audit-populated";
+        // Record two events directly (a full ceremony needs a browser authenticator).
+        webAuthnAuditService.record(tenant, "user-a", WebAuthnAuditEvent.PASSKEY_REGISTERED,
+                "cred-1", "aaguid-1", "MacBook");
+        webAuthnAuditService.record(tenant, "user-a", WebAuthnAuditEvent.PASSKEY_REMOVED,
+                "cred-1", "aaguid-1", null);
+        // A different tenant's event must never leak into this tenant's view.
+        webAuthnAuditService.record("other-tenant", "user-x", WebAuthnAuditEvent.PASSKEY_AUTHENTICATED,
+                "cred-x", null, null);
+
+        mockMvc.perform(get("/api/v1/mfa/webauthn/audit")
+                        .with(jwtForTenant(tenant, "admin", "tenant:admin")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$").isArray())
+                .andExpect(jsonPath("$.length()").value(2))
+                .andExpect(jsonPath("$[0].action").value("PASSKEY_REMOVED"))
+                .andExpect(jsonPath("$[0].subject").value("user-a"))
+                .andExpect(jsonPath("$[0].credentialId").value("cred-1"))
+                .andExpect(jsonPath("$[1].action").value("PASSKEY_REGISTERED"))
+                .andExpect(jsonPath("$[1].aaguid").value("aaguid-1"));
     }
 }

@@ -104,4 +104,57 @@ public final class MfaDtos {
     /** Assertion outcome. On success carries the resolved {@code tenant} + {@code subject}; both null on failure. */
     public record AssertVerifyResponse(boolean valid, String tenant, String subject) {
     }
+
+    // --- Per-tenant WebAuthn RP config (tenant-admin) ---
+
+    /** A tenant's effective WebAuthn RP configuration (the stored row, or global defaults when absent). */
+    public record WebAuthnConfigView(
+            String rpId,
+            String rpName,
+            List<String> origins,
+            String userVerification,
+            String authenticatorAttachment,
+            String residentKey,
+            String attestation,
+            boolean enabled) {
+
+        public static WebAuthnConfigView of(io.aegis.mfa.domain.WebAuthnTenantConfig c) {
+            return new WebAuthnConfigView(c.getRpId(), c.getRpName(), c.getOrigins(),
+                    c.getUserVerification(), c.getAuthenticatorAttachment(),
+                    c.getResidentKey(), c.getAttestation(), c.isEnabled());
+        }
+    }
+
+    /**
+     * Upsert body for a tenant's WebAuthn RP config (no tenantId — the tenant is taken from the token).
+     * Policy strings are validated in the service against their allowed sets; a bad value is a 400.
+     */
+    public record WebAuthnConfigUpdate(
+            @NotBlank String rpId,
+            String rpName,
+            List<String> origins,
+            String userVerification,
+            String authenticatorAttachment,
+            String residentKey,
+            String attestation,
+            Boolean enabled) {
+    }
+
+    // --- WebAuthn audit (tenant-admin) ---
+
+    /** One passkey audit event. Newest-first when listed. */
+    public record WebAuthnAuditView(
+            String id,
+            String subject,
+            String action,
+            String credentialId,
+            String aaguid,
+            String detail,
+            Instant at) {
+
+        public static WebAuthnAuditView of(io.aegis.mfa.domain.WebAuthnAuditEvent e) {
+            return new WebAuthnAuditView(e.getId().toString(), e.getSubject(), e.getAction(),
+                    e.getCredentialId(), e.getAaguid(), e.getDetail(), e.getAt());
+        }
+    }
 }
