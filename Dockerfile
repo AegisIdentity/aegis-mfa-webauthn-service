@@ -2,7 +2,10 @@
 # Runtime image. Build the fat jar first (mvn -q -DskipTests package) — the polyrepo shares the
 # aegis-platform-parent/commons artifacts via ~/.m2, so the compose 'build' step copies the
 # pre-built jar rather than rebuilding the reactor inside the image. Minimal JRE, non-root.
-FROM eclipse-temurin:21-jre AS runtime
+# L-svc-5: pin the base image by digest for reproducible, tamper-evident builds. Replace the floating
+# tag below with the resolved digest before release, e.g.:
+# (left as a floating tag here because the digest cannot be resolved in this offline environment).
+FROM eclipse-temurin:21-jre@sha256:273396ed5998598ed1091e8d72711c2d36980a0e65103859c55a4e977a41ffd3 AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app

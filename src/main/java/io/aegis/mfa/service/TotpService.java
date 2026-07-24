@@ -21,10 +21,13 @@ public class TotpService {
 
     private final TotpCredentialRepository repository;
     private final MfaProperties props;
+    private final TotpAttemptLimiter attemptLimiter;
 
-    public TotpService(TotpCredentialRepository repository, MfaProperties props) {
+    public TotpService(TotpCredentialRepository repository, MfaProperties props,
+                       TotpAttemptLimiter attemptLimiter) {
         this.repository = repository;
         this.props = props;
+        this.attemptLimiter = attemptLimiter;
     }
 
     /** A TOTP enrolment challenge: the secret to store in the app plus the otpauth URI to render as a QR. */
@@ -59,13 +62,20 @@ public class TotpService {
     }
 
     /** Step-up validation of an already-enabled TOTP. Returns false rather than throwing so the caller
-     *  (login flow) can re-prompt without a 4xx. Updates last-used on success. */
+     *  (login flow) can re-prompt without a 4xx. Rate-limited per (tenant, subject) with lockout (H6):
+     *  while locked out no code is checked; a failure increments the counter; success clears it and
+     *  updates last-used. */
     @Transactional
     public boolean validate(String tenantId, String subject, String code) {
-        TotpCredential cred = repository.findByTenantIdAndSubject(tenantId, subject).orElse(null);
-        if (cred == null || !cred.isEnabled() || !codeMatches(cred, code)) {
+        if (attemptLimiter.isLocked(tenantId, subject)) {
             return false;
         }
+        TotpCredential cred = repository.findByTenantIdAndSubject(tenantId, subject).orElse(null);
+        if (cred == null || !cred.isEnabled() || !codeMatches(cred, code)) {
+            attemptLimiter.recordFailure(tenantId, subject);
+            return false;
+        }
+        attemptLimiter.reset(tenantId, subject);
         cred.setLastUsedAt(Instant.now());
         repository.save(cred);
         return true;

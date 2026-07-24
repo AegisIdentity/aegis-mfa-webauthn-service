@@ -10,8 +10,10 @@ spring:
     password: ${POSTGRES_PASSWORD:dev-only-change-me}
   jpa:
     hibernate:
-      # Dev/test convenience. Production uses versioned migrations (Flyway) with ddl-auto=validate.
-      ddl-auto: update
+      # Ship a safe default (validate): production runs versioned migrations (Flyway) and must never let
+      # Hibernate mutate the schema. Local dev can set SPRING_JPA_DDL_AUTO=update; tests override to
+      # create-drop (src/test/resources/application.yml).
+      ddl-auto: ${SPRING_JPA_DDL_AUTO:validate}
     open-in-view: false
 
 aegis:
@@ -20,6 +22,14 @@ aegis:
     # ResourceServerJwtConfig). In Docker, AEGIS_JWKS_URI = http://authorization-server:9000/oauth2/jwks.
     jwk-set-uri: ${AEGIS_JWKS_URI:http://localhost:9000/oauth2/jwks}
     accepted-issuers: ${AEGIS_ACCEPTED_ISSUERS:http://localhost:9000,http://authorization-server:9000}
+  crypto:
+    # Base64 32-byte AES-256 key encrypting the TOTP shared secret at rest (H5). REQUIRED in prod/stage
+    # (or when aegis.security.require-external-secrets=true) — startup fails fast if unset there. In
+    # dev/test a built-in dev key is used (never protects real data).
+    field-key: ${AEGIS_FIELD_ENC_KEY:}
+  security:
+    # Set true (prod/stage do this via SPRING_PROFILES_ACTIVE) to force real external secrets/keys.
+    require-external-secrets: ${AEGIS_REQUIRE_EXTERNAL_SECRETS:false}
   mfa:
     totp:
       # Shown in the authenticator app (issuer:account). Digits/period/window are RFC 6238 defaults.

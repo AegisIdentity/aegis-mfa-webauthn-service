@@ -1,0 +1,14 @@
+# Test overrides. Testcontainers Postgres starts empty and there is no Flyway in this scaffold, so let
+# Hibernate build the schema for the test run (the shipped default is validate — see main application.yml).
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+
+aegis:
+  crypto:
+    # Provide an explicit test key so the context loads without the 'dev' profile. The
+    # FieldEncryptionKeyConfigurer now fails fast when no key is set outside the explicit 'dev' profile;
+    # tests exercise the real "configured key" path rather than any dev-key fallback. This is a throwaway
+    # test key (the well-known dev value), never used to protect real data.
+    field-key: YWVnaXMtZGV2LWZpZWxkLWVuY3J5cHRpb24ta2V5MzI=

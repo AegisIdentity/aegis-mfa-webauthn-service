@@ -342,16 +342,30 @@ public class WebAuthnService {
             // tenant-app passkey registered under the tenant's own rpId now verifies correctly.
             EffectiveRp rp = effectiveRp(cred.getTenantId());
             ServerProperty serverProperty = new ServerProperty(rp.origins(), rp.rpId(), challenge, null);
+            // M-svc-1: honour the tenant's configured userVerification policy instead of forcing "presence
+            // only" — a tenant that requires UV gets it enforced by webauthn4j.
+            boolean userVerificationRequired = "required".equals(rp.userVerification());
             AuthenticationParameters params = new AuthenticationParameters(
                     serverProperty,
                     credentialRecord,
-                    null,   // allowCredentials (usernameless)
-                    false,  // userVerificationRequired
-                    true);  // userPresenceRequired
+                    null,                       // allowCredentials (usernameless)
+                    userVerificationRequired,
+                    true);                      // userPresenceRequired
 
             AuthenticationData verified = webAuthnManager.verify(authenticationData, params);
 
+            // M-svc-1: reject a non-increasing signature counter (clone / replay detection) instead of
+            // unconditionally overwriting it. A stored+new pair of 0/0 is allowed — some authenticators
+            // never implement a counter — but any regression (new <= stored, when not that 0/0 case) fails.
+            long storedCount = cred.getSignCount();
             long newCount = verified.getAuthenticatorData().getSignCount();
+            if (newCount <= storedCount && !(newCount == 0 && storedCount == 0)) {
+                challenges.delete(stored);
+                audit.record(cred.getTenantId(), cred.getSubject(), WebAuthnAuditEvent.PASSKEY_ASSERT_FAILED,
+                        cred.getCredentialId(), cred.getAaguid(),
+                        "signature counter regression (stored=" + storedCount + ", presented=" + newCount + ")");
+                return failed();
+            }
             cred.setSignCount(newCount);
             cred.setLastUsedAt(Instant.now());
             credentials.save(cred);
