@@ -22,12 +22,14 @@ public class TotpService {
     private final TotpCredentialRepository repository;
     private final MfaProperties props;
     private final TotpAttemptLimiter attemptLimiter;
+    private final io.aegis.commons.audit.AuditRecorder audit;
 
     public TotpService(TotpCredentialRepository repository, MfaProperties props,
-                       TotpAttemptLimiter attemptLimiter) {
+                       TotpAttemptLimiter attemptLimiter, io.aegis.commons.audit.AuditRecorder audit) {
         this.repository = repository;
         this.props = props;
         this.attemptLimiter = attemptLimiter;
+        this.audit = audit;
     }
 
     /** A TOTP enrolment challenge: the secret to store in the app plus the otpauth URI to render as a QR. */
@@ -46,6 +48,7 @@ public class TotpService {
             existing.setEnabled(false);
             repository.save(existing);
         }
+        audit.record("mfa", "mfa.totp.enrolled", tenantId, subject, subject);
         return new Enrollment(secret, otpauthUri(accountName, secret));
     }
 
@@ -59,6 +62,7 @@ public class TotpService {
         cred.setEnabled(true);
         cred.setLastUsedAt(Instant.now());
         repository.save(cred);
+        audit.record("mfa", "mfa.totp.enabled", tenantId, subject, subject);
     }
 
     /** Step-up validation of an already-enabled TOTP. Returns false rather than throwing so the caller
@@ -68,16 +72,22 @@ public class TotpService {
     @Transactional
     public boolean validate(String tenantId, String subject, String code) {
         if (attemptLimiter.isLocked(tenantId, subject)) {
+            // A locked-out attempt is security-relevant — record it as a failure with the reason.
+            audit.record("mfa", "mfa.totp.failed", io.aegis.commons.audit.AuditOutcome.FAILURE,
+                    tenantId, subject, subject, java.util.Map.of("reason", "locked_out"));
             return false;
         }
         TotpCredential cred = repository.findByTenantIdAndSubject(tenantId, subject).orElse(null);
         if (cred == null || !cred.isEnabled() || !codeMatches(cred, code)) {
             attemptLimiter.recordFailure(tenantId, subject);
+            audit.record("mfa", "mfa.totp.failed", io.aegis.commons.audit.AuditOutcome.FAILURE,
+                    tenantId, subject, subject, java.util.Map.of("reason", "bad_code"));
             return false;
         }
         attemptLimiter.reset(tenantId, subject);
         cred.setLastUsedAt(Instant.now());
         repository.save(cred);
+        audit.record("mfa", "mfa.totp.validated", tenantId, subject, subject);
         return true;
     }
 
