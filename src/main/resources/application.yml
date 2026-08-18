@@ -2,6 +2,12 @@ server:
   port: 9103
 
 spring:
+  flyway:
+    enabled: true
+    # Pre-Flyway databases already have these tables (they were created by
+    # ddl-auto). Baselining marks them at the baseline version and skips V1
+    # instead of replaying it and failing on "relation already exists".
+    baseline-on-migrate: true
   application:
     name: aegis-mfa-webauthn-service
   datasource:

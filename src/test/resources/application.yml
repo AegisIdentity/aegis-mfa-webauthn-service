@@ -1,9 +1,11 @@
-# Test overrides. Testcontainers Postgres starts empty and there is no Flyway in this scaffold, so let
-# Hibernate build the schema for the test run (the shipped default is validate — see main application.yml).
+# Test overrides. Testcontainers Postgres starts empty; Flyway now builds the schema from
+# db/migration, and Hibernate only VALIDATES it — the same path a real deployment takes. Using
+# create-drop here instead would let Hibernate paper over a migration that does not actually match
+# the entities, which is the one thing these migrations exist to prevent.
 spring:
   jpa:
     hibernate:
-      ddl-auto: create-drop
+      ddl-auto: validate
 
 aegis:
   crypto:
